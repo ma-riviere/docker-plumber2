@@ -1,3 +1,13 @@
 .git
 .github
 *.md
+.Rprofile
+.Rhistory
+packages.txt
+r-utils/
+renv/library/
+renv/.cache/
+renv/activate.R
+renv/settings.json
+# local profile libraries from lockfile generation; only the renv.lock files matter
+renv/profiles/*/renv/

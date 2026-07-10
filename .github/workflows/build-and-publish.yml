@@ -14,6 +14,8 @@ on:
         default: false
         type: boolean
   schedule:
+    # Monthly refresh of Debian security updates.
+    # Does NOT update R packages: those require a lockfile-regeneration commit.
     - cron: '17 3 1 * *'
 
 permissions:
@@ -24,21 +26,55 @@ jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        r_version: ["4.5.3"]
+        include:
+          - r_version: "4.6.1"
+            r_minor: "4.6"
+            latest: true
+          - r_version: "4.5.3"
+            r_minor: "4.5"
+            latest: false
+          - r_version: "4.4.3"
+            r_minor: "4.4"
+            latest: false
+    env:
+      IMAGE: ghcr.io/ma-riviere/docker-plumber2
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          {
+            echo "builder=${IMAGE}:${{ matrix.r_version }}-builder,${IMAGE}:${{ matrix.r_minor }}-builder"
+            runtime="${IMAGE}:${{ matrix.r_version }}-runtime,${IMAGE}:${{ matrix.r_minor }}-runtime"
+            if [ "${{ matrix.latest }}" = "true" ]; then
+              runtime="${runtime},${IMAGE}:latest"
+            fi
+            echo "runtime=${runtime}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Gate: nothing is pushed for a matrix entry whose verification fails
       - name: Build verification image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           target: verify
           platforms: linux/amd64
-          build-args: R_VERSION=${{ matrix.r_version }}
-          no-cache: ${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild }}
-          # Read-scoped PAT for the private auth0r GitHub install during the pre-warm
+          pull: true
+          build-args: |
+            R_VERSION=${{ matrix.r_version }}
+            R_VERSION_SHORT=${{ matrix.r_minor }}
+          # Monthly scheduled runs rebuild cold so apt/system layers actually refresh
+          no-cache: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.force_rebuild) }}
+          cache-from: type=gha,scope=plumber2-${{ matrix.r_version }}
+          cache-to: type=gha,scope=plumber2-${{ matrix.r_version }},mode=max
+          # Read-scoped PAT for the private auth0r GitHub install during the restore
           secrets: |
             github_pat=${{ secrets.GH_PAT_AUTH0R }}
 
@@ -49,26 +85,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push builder image
+      - name: Push builder image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           target: builder
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/ma-riviere/docker-plumber2:${{ matrix.r_version }}-builder
-          build-args: R_VERSION=${{ matrix.r_version }}
-          no-cache: ${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild }}
+          tags: ${{ steps.tags.outputs.builder }}
+          build-args: |
+            R_VERSION=${{ matrix.r_version }}
+            R_VERSION_SHORT=${{ matrix.r_minor }}
+          cache-from: type=gha,scope=plumber2-${{ matrix.r_version }}
           secrets: |
             github_pat=${{ secrets.GH_PAT_AUTH0R }}
 
-      - name: Build and push runtime image
+      - name: Push runtime image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           target: runtime
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/ma-riviere/docker-plumber2:${{ matrix.r_version }}-runtime
-          build-args: R_VERSION=${{ matrix.r_version }}
-          no-cache: ${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild }}
+          tags: ${{ steps.tags.outputs.runtime }}
+          build-args: |
+            R_VERSION=${{ matrix.r_version }}
+            R_VERSION_SHORT=${{ matrix.r_minor }}
+          cache-from: type=gha,scope=plumber2-${{ matrix.r_version }}

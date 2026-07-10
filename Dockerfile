@@ -1,4 +1,5 @@
-ARG R_VERSION=4.5.3
+ARG R_VERSION=4.6.1
+ARG R_VERSION_SHORT=4.6
 ARG DEBIAN_NUMERIC=13
 ARG DEBIAN_CODENAME=trixie
 
@@ -29,6 +30,8 @@ RUN curl --fail --location --output /tmp/r.deb \
 
 FROM r-deb AS builder
 
+ARG R_VERSION
+ARG R_VERSION_SHORT
 ARG DEBIAN_CODENAME
 
 RUN apt-get update \
@@ -52,22 +55,32 @@ RUN apt-get update \
         libwebp-dev \
     && rm -rf /var/lib/apt/lists/*
 
-ENV RENV_CONFIG_REPOS_OVERRIDE=https://packagemanager.posit.co/cran/__linux__/${DEBIAN_CODENAME}/latest \
-    RENV_CONFIG_SANDBOX_ENABLED=false \
-    RENV_CONFIG_AUTO_SNAPSHOT=false
+# No RENV_CONFIG_REPOS_OVERRIDE: restores must honor the lockfile's dated PPM snapshot.
+# No renv cache: restores install real files straight into the site library
+# (cache symlinks would break COPY --from, and the cache doubles the image).
+ENV RENV_CONFIG_SANDBOX_ENABLED=false \
+    RENV_CONFIG_AUTO_SNAPSHOT=false \
+    RENV_CONFIG_CACHE_ENABLED=false
 
-# Latest renv, as a PPM binary; the app lockfiles pin their own renv record.
+# Latest renv, as a PPM binary; it only drives restores (lockfiles pin their own records).
 RUN mkdir -p /opt/renv-bootstrap \
-    && Rscript -e 'install.packages("renv", lib = "/opt/renv-bootstrap", repos = Sys.getenv("RENV_CONFIG_REPOS_OVERRIDE"))'
+    && PPM_LATEST="https://packagemanager.posit.co/cran/__linux__/${DEBIAN_CODENAME}/latest" \
+       Rscript -e 'install.packages("renv", lib = "/opt/renv-bootstrap", repos = Sys.getenv("PPM_LATEST"))'
 
-COPY packages.txt /tmp/packages.txt
+COPY renv/profiles/docker-${R_VERSION_SHORT}/renv.lock /tmp/renv.lock
+
+# The selected lockfile must match the installed R (guards matrix typos pairing
+# e.g. R 4.5.3 with the docker-4.6 lockfile)
+RUN grep -A2 '"R":' /tmp/renv.lock | grep -q "\"Version\": \"${R_VERSION}\"" \
+    || { echo "Lockfile R version does not match R_VERSION=${R_VERSION}"; exit 1; }
 
 # auth0r comes from a private GitHub repo: its install needs a read-scoped PAT,
 # passed as a BuildKit secret so it never lands in a layer.
 RUN --mount=type=secret,id=github_pat \
     mkdir -p "${R_LIBS_SITE}" \
     && GITHUB_PAT="$(cat /run/secrets/github_pat 2>/dev/null || true)" \
-    Rscript -e '.libPaths(c("/opt/renv-bootstrap", .libPaths())); renv::install(readLines("/tmp/packages.txt"), library = Sys.getenv("R_LIBS_SITE"))'
+    Rscript -e '.libPaths(c("/opt/renv-bootstrap", .libPaths())); renv::restore(lockfile = "/tmp/renv.lock", library = Sys.getenv("R_LIBS_SITE"), clean = TRUE, prompt = FALSE)' \
+    && rm -rf /root/.cache/R
 
 RUN find "${R_LIBS_SITE}" -depth -type d \
         \( -name help -o -name html -o -name doc -o -name tests \) -exec rm -rf {} +
@@ -132,4 +145,20 @@ FROM runtime AS verify
 
 COPY --from=builder ${R_LIBS_SITE} ${R_LIBS_SITE}
 
-RUN Rscript -e 'library_path <- Sys.getenv("R_LIBS_SITE"); packages <- rownames(installed.packages(lib.loc = library_path)); failed <- packages[!vapply(packages, requireNamespace, logical(1), quietly = TRUE, lib.loc = library_path)]; if (length(failed)) stop(paste("Could not load:", paste(failed, collapse = ", ")))' 
+RUN Rscript -e 'library_path <- Sys.getenv("R_LIBS_SITE"); packages <- rownames(installed.packages(lib.loc = library_path)); failed <- packages[!vapply(packages, requireNamespace, logical(1), quietly = TRUE, lib.loc = library_path)]; if (length(failed)) stop(paste("Could not load:", paste(failed, collapse = ", ")))'
+
+# Runtime contract: no build tooling, app user exists, library path wired
+RUN <<'EOF'
+#!/bin/bash
+set -eu
+for tool in gcc g++ gfortran make git; do
+    if command -v "$tool" > /dev/null 2>&1; then
+        echo "forbidden tool in runtime: $tool"
+        exit 1
+    fi
+done
+id app > /dev/null
+[ -d "$R_LIBS_SITE" ]
+Rscript -e 'stopifnot(Sys.getenv("R_LIBS_SITE") %in% .libPaths())'
+echo "runtime contract OK"
+EOF

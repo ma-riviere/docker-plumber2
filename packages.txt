@@ -9,7 +9,6 @@ base64enc
 bit
 bit64
 blob
-brew
 brio
 brotli
 butcher
@@ -50,9 +49,7 @@ nanonext
 openssl
 otel
 pillar
-pkgbuild
 pkgconfig
-pkgload
 plumber2
 pool
 prettyunits
@@ -65,11 +62,9 @@ ragg
 rapidoc
 rappdirs
 readr
-renv
 reqres
 rlang
 routr
-roxygen2
 rprojroot
 sass
 sodium
@@ -92,7 +87,6 @@ vroom
 waysign
 websocket
 webutils
-whisker
 withr
 xfun
 xml2
