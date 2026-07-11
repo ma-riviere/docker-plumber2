@@ -1,6 +1,9 @@
 .git
 .github
 *.md
+.lintr
+air.toml
+jarl.toml
 .Rprofile
 .Rhistory
 packages.txt
